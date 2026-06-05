@@ -66,21 +66,21 @@ Subcommands you will use:
 
 ```bash
 # Search by query. Combines all three sources, deduplicated.
-python scripts/discover.py keyword "safe reinforcement learning Lyapunov" \
+python ${CLAUDE_SKILL_DIR}/scripts/discover.py keyword "safe reinforcement learning Lyapunov" \
     --year-from 2018 --limit 25
 
 # Backward references (works the paper cites).
-python scripts/discover.py refs 10.1109/CDC.2018.8619252 --limit 100
+python ${CLAUDE_SKILL_DIR}/scripts/discover.py refs 10.1109/CDC.2018.8619252 --limit 100
 
 # Forward citations (works that cite the paper).
-python scripts/discover.py cites 10.1109/CDC.2018.8619252 --limit 100
+python ${CLAUDE_SKILL_DIR}/scripts/discover.py cites 10.1109/CDC.2018.8619252 --limit 100
 
 # Lookup a single paper by DOI or arXiv ID.
-python scripts/discover.py lookup 2006.16236
+python ${CLAUDE_SKILL_DIR}/scripts/discover.py lookup 2006.16236
 
 # Convert JSON records (optionally with an `annote` field added) to BibTeX,
 # avoiding citekey collisions with an existing .bib file.
-cat filtered.json | python scripts/discover.py to-bibtex \
+cat filtered.json | python ${CLAUDE_SKILL_DIR}/scripts/discover.py to-bibtex \
     --existing-bib lit_review/wide.bib >> lit_review/wide.bib
 ```
 

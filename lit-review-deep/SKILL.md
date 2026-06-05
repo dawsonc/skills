@@ -85,16 +85,16 @@ into `requests.md`. Stdlib only.
 
 ```bash
 # 1. Promote: copy entries from wide.bib to deep.bib by citekey.
-python scripts/deep_ops.py promote coulom2006mcts kingma2014adam
+python ${CLAUDE_SKILL_DIR}/scripts/deep_ops.py promote coulom2006mcts kingma2014adam
 
 # 2. Acquire: try to download a PDF (arXiv / OpenReview / direct OA URL).
-python scripts/deep_ops.py acquire coulom2006mcts
+python ${CLAUDE_SKILL_DIR}/scripts/deep_ops.py acquire coulom2006mcts
 
 # 3. Status: which deep.bib citekeys have / lack a local PDF.
-python scripts/deep_ops.py status
+python ${CLAUDE_SKILL_DIR}/scripts/deep_ops.py status
 
 # 4. Request: queue a paywalled paper for the user to fetch manually.
-python scripts/deep_ops.py request paywalled2020
+python ${CLAUDE_SKILL_DIR}/scripts/deep_ops.py request paywalled2020
 ```
 
 PDF acquisition is best-effort and does *not* attempt to bypass paywalls.
