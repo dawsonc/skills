@@ -1,0 +1,13 @@
+# findpapers, pinned to an immutable commit.
+#
+# Why a commit and not a version: the PyPI release (0.6.7, Nov 2022) is the OLD
+# Typer-CLI codebase with different semantics. The current library API (Engine,
+# eight databases, snowball/similar) only exists on the `main` branch, which
+# carries no release tag. A commit SHA is content-addressed, so this line names
+# exactly one immutable tree.
+#
+# Update deliberately: edit the SHA, re-run bootstrap.sh, re-run the smoke tests
+# in the skill's verification section. Never install at invocation time.
+#
+# Pinned 2026-09-16 from https://github.com/jonatasgrosman/findpapers (MIT).
+findpapers @ git+https://github.com/jonatasgrosman/findpapers@3b42b66befa0a64416258e7481201a0253f09e73

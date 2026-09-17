@@ -100,7 +100,25 @@ python ${CLAUDE_SKILL_DIR}/scripts/deep_ops.py request paywalled2020
 PDF acquisition is best-effort and does *not* attempt to bypass paywalls.
 Sources tried, in order: arXiv (via `eprint` field), OpenReview (via the
 `url` field pattern), any `url` ending in `.pdf` that resolves to a PDF
-content-type. Anything else routes to `requests.md`.
+content-type. Anything else falls through to the second attempt below, and
+then to `requests.md`.
+
+### Second attempt: the wide skill's downloader
+
+When `deep_ops.py acquire` fails and the entry has a DOI, try findpapers
+before giving up. It tries every URL it knows for the paper and follows HTML
+landing pages to resolve the real PDF link, which catches publisher pages
+`deep_ops.py` cannot parse:
+
+```bash
+bash ${CLAUDE_SKILL_DIR}/../lit-review-wide/scripts/run.sh discover.py download \
+    <doi> --name <citekey> --out lit_review/pdfs
+```
+
+It saves `lit_review/pdfs/<citekey>.pdf` on success and exits non-zero on
+failure, leaving a reason in `lit_review/pdfs/download_log.txt`. It does not
+defeat authentication — a genuinely paywalled paper still fails, and still
+belongs in `requests.md`.
 
 ## Workflow
 
@@ -116,8 +134,10 @@ original handy as a sanity check.
 For each promoted citekey, run `deep_ops.py acquire <citekey>`. Capture the
 result. Batch this — it makes the next step much smoother.
 
-For any failures, run `deep_ops.py request <citekey>` to add a row to
-`requests.md` with the title, DOI, and best landing URL.
+For any failure, try the findpapers downloader above once (it needs the DOI
+from the entry, which you already have in `deep.bib`). Only if that also
+fails, run `deep_ops.py request <citekey>` to add a row to `requests.md` with
+the title, DOI, and best landing URL.
 
 When PDFs become available later (the user drops them into `pdfs/`),
 remove the corresponding row from `requests.md` and proceed.
@@ -138,9 +158,13 @@ For each paper with a local PDF, read it. Aim to understand:
   framing suggests.
 
 For papers without a local PDF, work from abstract + the paper's own
-references (visible in citation chasing) + any reviews/discussions found via
-the wide skill's tools. Be explicit in the annotation that the read is
-abstract-based and which questions remain open.
+references + any reviews/discussions found via the wide skill's tools. Be
+explicit in the annotation that the read is abstract-based and which questions
+remain open.
+
+The wide skill's `discover.py get <doi>` returns `references` and `cited_by`
+as lists of DOIs, so a work cited in a paper you are reading can be resolved
+directly with another `get` instead of a fresh keyword search.
 
 ### 4. Write the per-paper section in summary_deep.md
 
@@ -239,9 +263,9 @@ While reading, you will encounter cited works that look essential and are
 not yet in the review. Two options:
 
 1. **If clearly in-scope:** add the paper to `wide.bib` first (via the wide
-   skill's `discover.py lookup`/`refs`/`cites`), then promote into
-   `deep.bib`. Maintains the invariant that everything in `deep.bib` came
-   from `wide.bib`.
+   skill's `discover.py get <doi>`, or `snowball --direction backward|forward`
+   from the paper you are reading), then promote into `deep.bib`. Maintains
+   the invariant that everything in `deep.bib` came from `wide.bib`.
 2. **If marginal:** note it in `summary_deep.md` under "Notes" with a
    one-line justification, but do not pull it into the review. Surface
    these to the user — they may want to widen scope.

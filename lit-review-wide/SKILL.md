@@ -31,10 +31,24 @@ scan without re-reading abstracts.
 
 ## Prerequisites
 
-Before doing anything else, read `lit_review/scope.md`. If it does not exist,
-stop and tell the user to run the lit-review-scoping skill first. The wide
-search keyword clusters, subtopic taxonomy, and in/out-of-scope rules all live
-there.
+Two things must be in place before any searching.
+
+**1. `lit_review/scope.md`.** Read it. If it does not exist, stop and tell the
+user to run the lit-review-scoping skill first. The wide search keyword
+clusters, subtopic taxonomy, and in/out-of-scope rules all live there.
+
+**2. The pinned findpapers install.** Check it in one call:
+
+```bash
+bash ${CLAUDE_SKILL_DIR}/scripts/run.sh --check
+```
+
+That prints the installed version, where it resolved from, and which API keys
+are present. If it exits non-zero the venv is missing: tell the user to run
+`bash ${CLAUDE_SKILL_DIR}/scripts/bootstrap.sh` once, and wait. Do not install
+it yourself mid-search, and never `pip install` from git at invocation time —
+the version in use is pinned to a single commit in `scripts/findpapers.pin`
+deliberately, so that what runs today is what was reviewed.
 
 ## Folder contract
 
@@ -58,40 +72,99 @@ the user's manuscript can rely on them.
 
 ## The bundled discovery script
 
-`scripts/discover.py` does all the API work: keyword search across Semantic
-Scholar, OpenAlex, and arXiv (deduplicated), citation chasing in both
-directions, and JSON→BibTeX conversion. Stdlib only; APIs are keyless.
+`scripts/discover.py` does all the API work, bridging to
+[findpapers](https://github.com/jonatasgrosman/findpapers). One query reaches
+eight databases, deduplicated across them: arXiv, CrossRef, IEEE Xplore,
+OpenAlex, PubMed, Scopus, Semantic Scholar, Web of Science. It also does
+citation traversal, content-similarity lookup, and JSON→BibTeX conversion.
 
-Subcommands you will use:
+Always invoke it through `run.sh`, which selects the pinned interpreter and
+loads API keys from `~/.config/lit-review/findpapers.env`:
 
 ```bash
-# Search by query. Combines all three sources, deduplicated.
-python ${CLAUDE_SKILL_DIR}/scripts/discover.py keyword "safe reinforcement learning Lyapunov" \
+# Boolean search across every database that has a key.
+bash ${CLAUDE_SKILL_DIR}/scripts/run.sh discover.py search \
+    '[safe reinforcement learning] AND ([Lyapunov] OR [control barrier function])' \
     --year-from 2018 --limit 25
 
-# Backward references (works the paper cites).
-python ${CLAUDE_SKILL_DIR}/scripts/discover.py refs 10.1109/CDC.2018.8619252 --limit 100
+# One paper, by DOI or landing-page URL.
+bash ${CLAUDE_SKILL_DIR}/scripts/run.sh discover.py get 10.1109/CDC.2018.8619252
 
-# Forward citations (works that cite the paper).
-python ${CLAUDE_SKILL_DIR}/scripts/discover.py cites 10.1109/CDC.2018.8619252 --limit 100
+# Citation traversal. --direction backward = references, forward = citations.
+bash ${CLAUDE_SKILL_DIR}/scripts/run.sh discover.py snowball 10.1109/CDC.2018.8619252 \
+    --direction backward --max-depth 1 --max-papers-per-level 25
 
-# Lookup a single paper by DOI or arXiv ID.
-python ${CLAUDE_SKILL_DIR}/scripts/discover.py lookup 2006.16236
+# Content-similar papers around a seed. Uses no keywords at all.
+bash ${CLAUDE_SKILL_DIR}/scripts/run.sh discover.py similar 10.1109/CDC.2018.8619252
 
-# Convert JSON records (optionally with an `annote` field added) to BibTeX,
-# avoiding citekey collisions with an existing .bib file.
-cat filtered.json | python ${CLAUDE_SKILL_DIR}/scripts/discover.py to-bibtex \
-    --existing-bib lit_review/wide.bib >> lit_review/wide.bib
+# JSON records (with the `annote` you wrote) → BibTeX, avoiding citekey
+# collisions with an existing .bib file.
+bash ${CLAUDE_SKILL_DIR}/scripts/run.sh discover.py to-bibtex \
+    --input filtered.json --existing-bib lit_review/wide.bib >> lit_review/wide.bib
 ```
 
-Read the script's docstring (`head -50 scripts/discover.py`) if you need the
-output schema. Records carry `doi`, `arxiv_id`, `s2_id`, `openalex_id`,
-`abstract`, `citation_count`, `open_access_pdf_url`, and a `sources` list.
+Write the invocation out in full each time rather than aliasing it into a
+shell variable: the user's shell is zsh, which does not word-split an
+unquoted `$var`, so `R="bash run.sh discover.py"; $R search ...` fails with
+"No such file or directory".
 
-The script's BibTeX entry-type heuristic (`@article` vs `@inproceedings` vs
-`@misc`) is good but not perfect — source APIs do not reliably distinguish
-journal from conference. Spot-check the first few entries before committing
-to `wide.bib`; flip types by hand where obviously wrong.
+Each record carries `doi`, `arxiv_id`, `abstract`, `citation_count`,
+`keywords`, `entry_type`, `is_open_access`, `is_retracted`, `references`,
+`cited_by`, and a `sources` list naming the databases the paper was found in.
+Read the script's docstring (`head -60 scripts/discover.py`) for the full
+schema.
+
+Records go to stdout; a run summary goes to stderr. Keep the two separate
+(`> out.json 2> summary.txt`, or let stderr through to your terminal) — the
+summary is how you learn which databases actually answered.
+
+### Query syntax is boolean, not free text
+
+This is the easiest thing to get wrong. findpapers translates one bracketed
+boolean expression into each database's native syntax, and **a bare
+unbracketed string is treated as a single literal phrase** — so
+`safe reinforcement learning Lyapunov` searches for that exact phrase and
+returns almost nothing. Bracket every term.
+
+Translate each scope.md cluster into canonical form:
+
+```
+scope.md:   "backward reachable set" AND (attack OR adversarial) AND "cyber-physical"
+findpapers: [backward reachable set] AND ([attack] OR [adversarial]) AND [cyber-physical]
+```
+
+- Connectors are `AND`, `OR`, `AND NOT`, with whitespace on both sides.
+- Group with parentheses; groups nest.
+- Filter codes go before a bracket or a group: `ti` (title), `abs`, `key`
+  (keywords), `au`, `src` (venue), `aff`, `tiabs`, `tiabskey`. The innermost
+  one wins, so `ti([neural network] OR abs[deep learning])` searches the title
+  for one term and the abstract for the other.
+- Wildcards: `?` is one character, `*` is zero or more. Never at the start of
+  a term, one per term, single-word terms only.
+
+**A database that cannot express your filter code or wildcard is dropped from
+the run silently.** Using no filter code at all is the safest default. When
+you do use one, read the stderr summary to see who answered instead of
+assuming everyone did.
+
+### Which databases answer
+
+| Database | API key | Notes |
+|---|---|---|
+| arXiv | none needed | preprints; no citation counts |
+| CrossRef | none needed | enrichment and backward snowball only — not keyword search |
+| OpenAlex | **effectively required** | keyless budget is ~10 requests/day |
+| PubMed | optional | biomedical only; 3 → 10 req/s with a key |
+| Semantic Scholar | optional | shared anonymous pool without a key |
+| IEEE Xplore | required | ~200 req/day |
+| Scopus | required | full access needs an institutional network |
+| Web of Science | required | free tier is the Starter API, 1 req/s |
+
+A database whose key is missing is dropped from the run and named in the
+summary, so a keyless sweep still works — with thinner coverage and a hard
+OpenAlex ceiling. If `run.sh --check` reports missing keys and the review
+depends on IEEE/Elsevier/Clarivate-indexed venues, say so once and point the
+user at `~/.config/lit-review/findpapers.env`. Do not repeat it every run.
 
 ## Workflow
 
@@ -113,24 +186,30 @@ State the chosen mode in one sentence before running anything.
 
 ### 2. Plan the searches
 
-For an initial build, take each keyword cluster from scope.md and turn it
-into one or two `discover.py keyword` invocations. For follow-ups, write the
-specific queries you intend to run.
+For an initial build, translate each keyword cluster from scope.md into one or
+two bracketed boolean `search` queries (see Query syntax above). For
+follow-ups, write out the specific queries you intend to run.
 
 Tell the user the plan briefly before executing — a 4-line summary, not a
 table. They will catch obvious gaps faster than you will.
 
 Best-practice habits:
 
-- **Use multiple sources.** Default `--sources s2 openalex arxiv`. Single-
-  source results miss systematically — S2's index is patchy for niche venues;
-  OpenAlex picks up grey literature; arXiv catches preprints S2 has not
-  ingested yet.
-- **Run synonym variants separately.** "Safe RL" and "constrained policy
-  optimization" surface different papers even though the topic is the same.
-  Each scope.md cluster usually expands to several queries.
-- **Cite-chase from seed papers** named in scope.md. Backward refs catch
-  foundational work the keywords miss; forward cites catch recent extensions.
+- **Leave `--databases` unset** unless you have a specific reason. The default
+  is every database that has a key, and the summary reports who answered.
+- **Let one query carry the synonyms.** `[safe RL] OR [constrained policy
+  optimization]` inside a single search covers what used to take two runs.
+  Still split them when the synonyms pull genuinely different literatures:
+  results are ranked per database, so a rare term can get buried inside a
+  large `OR` group.
+- **Cite-chase with `snowball`** from the seed papers named in scope.md.
+  `--direction backward` catches foundational work the keywords miss, `forward`
+  catches recent extensions. Depth grows fast — at `--max-depth 2` always pair
+  it with `--max-papers-per-level`.
+- **Use `similar` as a vocabulary check.** After the keyword sweep, run it on
+  two or three of the most central papers. It uses no keywords at all, so
+  whatever it surfaces that your queries missed is telling you your search
+  terms are off — feed that back into the next round of queries.
 - **Date filters.** Use `--year-from` to constrain to the relevant window when
   the user has specified one. Otherwise leave it open — older foundational
   work matters.
@@ -141,6 +220,13 @@ The raw JSON from `discover.py` is candidates, not includes. Apply scope.md's
 in/out rules: drop papers outside the topical or temporal boundaries, drop
 duplicates of papers already in wide.bib (the script dedupes across one call,
 not against the existing .bib — check by DOI / arXiv ID / title).
+
+**Check `is_retracted` before anything else.** A record flagged `true` is
+either dropped or kept with its `annote` opening `RETRACTED:` — never silently
+included. Tell the user about every retraction you hit: a retracted paper
+sitting in the field's citation graph is worth knowing about whether or not it
+enters the review. The flag comes from enrichment, so `null` means unknown,
+not clean.
 
 Be honest about borderline cases. If a paper is plausibly relevant but you
 are not sure, keep it and flag uncertainty in the `annote`. Better to over-
@@ -170,10 +256,17 @@ not collide with what is already there.
 Workflow:
 
 1. Save the filtered records (with `annote` fields you wrote) to a temp JSON.
-2. Run `discover.py to-bibtex --input tmp.json --existing-bib
+2. Run `run.sh discover.py to-bibtex --input tmp.json --existing-bib
    lit_review/wide.bib >> lit_review/wide.bib`.
-3. Spot-check the resulting entries; fix entry types if needed.
+3. Spot-check the resulting entries; fix entry types and venues if needed.
 4. Delete the temp JSON.
+
+Entry types come from findpapers' `paper_type` rather than a venue-keyword
+guess, which is a real improvement but not infallible: venue resolution
+sometimes picks an aggregator or repository mirror over the actual
+proceedings, and a conference paper then arrives as `@article` with a wrong
+`journal` field. Check the `venue` of the first few entries in each batch
+against what you know the paper is, and fix by hand.
 
 ### 6. Update summary_wide.md
 
@@ -202,14 +295,20 @@ Append one entry to `search_log.md` per query you ran:
 
 ```markdown
 ## 2026-06-01 — initial build, cluster "safe RL"
-- `discover.py keyword "safe reinforcement learning Lyapunov" --year-from 2018`
+- `search '[safe reinforcement learning] AND [Lyapunov]' --year-from 2018`
+  - answered: arxiv=9, openalex=12, scopus=4 | no key: ieee, wos
   - returned: 25, new: 19, dropped (out of scope): 4
-- `discover.py keyword "constrained policy optimization" --year-from 2018`
-  - returned: 18, new: 12, dropped (out of scope): 2
+- `snowball 10.1109/CDC.2018.8619252 --direction backward --max-depth 1`
+  - answered: crossref=24
+  - returned: 24, new: 11, dropped (out of scope): 13
 ```
 
 "New" = not already in `wide.bib` before this run. Track this so the
 saturation check has data.
+
+Log the databases as well as the counts, copied from the run summary. A sweep
+that quietly lost Scopus to an expired key looks exactly like a saturated
+field if all you recorded was "returned: 25, new: 3".
 
 ### 8. Saturation check
 
@@ -225,6 +324,10 @@ user with a one-line interpretation:
 
 This is a signal, not a rule. A real field might genuinely saturate at 100
 papers or take 500. Tell the user the rate, let them decide.
+
+Before calling saturation, check the per-database counts in the summary for
+the cluster. A low new-paper rate concentrated in two databases while three
+others returned nothing is a coverage problem, not saturation.
 
 ### 9. Hand off
 
@@ -287,7 +390,10 @@ deep synthesis later.>
 
 - Read full-text PDFs. Annotations are abstract-based; deeper reading is the
   job of lit-review-deep.
-- Download paywalled content. The script reports `open_access_pdf_url` when
-  available; that is all.
+- Bypass paywalls. Records report `is_open_access` and an
+  `open_access_pdf_url` when one exists; actually fetching PDFs is the deep
+  skill's job.
+- Install or upgrade its own tooling. findpapers is pinned to one commit and
+  installed once by `bootstrap.sh`; if it is missing, say so and stop.
 - Decide what to write a paper about. It surfaces what exists; judgment about
   novelty and gaps is the deep skill's job and ultimately the user's.

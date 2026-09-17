@@ -101,7 +101,19 @@ thought:
 - **Keyword clusters.** Produce ready-to-use search strings, grouped by
   subtopic, each with synonyms and community-specific variants (the same idea
   is often named differently in ML vs. controls vs. OR). The lit-review-wide
-  skill consumes these directly.
+  skill runs these directly, so write them in the boolean syntax its
+  `discover.py search` takes: every term in square brackets, joined with
+  `AND` / `OR` / `AND NOT`, parentheses for grouping, and each cluster's
+  synonyms as one `OR` group.
+
+  ```
+  [backward reachable set] AND ([attack] OR [adversarial]) AND [cyber-physical]
+  ```
+
+  An unbracketed string is treated as one literal phrase, so a cluster written
+  as prose will search for that exact phrase and find nothing. Community
+  variants belong inside the `OR` group where they will actually fire, not in
+  a trailing note.
 - **Subtopic taxonomy.** A 3–7 item breakdown of the area. This becomes the
   section skeleton of `summary_wide.md`, so make it MECE-ish and stable.
 
@@ -167,8 +179,10 @@ _Last updated: <YYYY-MM-DD>_
 **Journals:** ...
 
 ## Search keyword clusters
+<Bracketed boolean queries, ready to paste into `discover.py search`.>
 ### <subtopic 1>
-- "<query string>" — variants: ...
+- `[term] AND ([synonym a] OR [synonym b])`
+- `[other framing] AND NOT [out-of-scope sense]`
 ### <subtopic 2>
 - ...
 
