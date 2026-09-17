@@ -59,6 +59,7 @@ from __future__ import annotations
 import argparse
 import datetime
 import json
+import logging
 import os
 import re
 import sys
@@ -97,6 +98,47 @@ KEY_ENV = {
     "scopus": "FINDPAPERS_SCOPUS_API_TOKEN",
     "wos": "FINDPAPERS_WOS_API_TOKEN",
 }
+
+
+# ---------------------------------------------------------------------------
+# Degraded-database detection
+# ---------------------------------------------------------------------------
+
+_SECRET_RE = re.compile(r"((?:api)?_?key|token)=([^&\s]+)", re.I)
+
+
+class ConnectorWatch(logging.Handler):
+    """Collect WARNING+ records emitted by findpapers connectors.
+
+    A connector that hits a 403, an exhausted quota, or a rate limit logs a
+    warning, returns whatever it collected, and does NOT mark itself failed --
+    findpapers prefers partial results. The consequence is that a dead API key
+    arrives here as "0 papers", which is indistinguishable from a database that
+    genuinely has nothing on the topic. In a systematic review that difference
+    matters a great deal, so these warnings are captured and reported.
+    """
+
+    def __init__(self) -> None:
+        super().__init__(level=logging.WARNING)
+        self.seen: dict[str, str] = {}
+
+    def emit(self, record: logging.LogRecord) -> None:
+        db = record.name.rsplit(".", 1)[-1]
+        msg = _SECRET_RE.sub(r"\1=***", record.getMessage())
+        msg = msg.split(" Returning the papers")[0]
+        msg = re.split(r"\s+for url:", msg)[0].strip().rstrip("(")
+        self.seen.setdefault(db, msg[:220])
+
+    def __enter__(self) -> ConnectorWatch:
+        logging.getLogger("findpapers").addHandler(self)
+        return self
+
+    def __exit__(self, *exc: object) -> None:
+        logging.getLogger("findpapers").removeHandler(self)
+
+    @property
+    def degraded(self) -> list[str]:
+        return [f"{db}: {msg}" for db, msg in sorted(self.seen.items())]
 
 
 # ---------------------------------------------------------------------------
@@ -202,6 +244,7 @@ def summarise(
     queried: list[str] | None = None,
     failed: list[str] | None = None,
     key_skipped: list[str] | None = None,
+    degraded: list[str] | None = None,
     runtime: float | None = None,
     extra: str | None = None,
 ) -> None:
@@ -234,6 +277,13 @@ def summarise(
         lines.append(
             f"#   no API key: {', '.join(key_skipped)}"
             "  (set FINDPAPERS_*_API_TOKEN to include)"
+        )
+    if degraded:
+        lines.append("#   DEGRADED -- these databases returned partial or no results:")
+        lines.extend(f"#     {d}" for d in degraded)
+        lines.append(
+            "#     Treat their counts as unreliable; this is NOT evidence of an"
+            " empty field."
         )
     if retracted:
         lines.append(f"#   RETRACTED:  {retracted} paper(s) flagged is_retracted")
@@ -394,16 +444,17 @@ def _cmd_search(args: argparse.Namespace) -> None:
     if not dbs:
         sys.exit("discover.py: no searchable databases available (check API keys)")
     engine = build_engine()
-    result = engine.search(
-        args.query,
-        databases=dbs,
-        max_papers_per_database=args.limit,
-        since=since,
-        until=until,
-        num_workers=args.workers,
-        show_progress=False,
-        enrichment_databases=[] if args.no_enrich else None,
-    )
+    with ConnectorWatch() as watch:
+        result = engine.search(
+            args.query,
+            databases=dbs,
+            max_papers_per_database=args.limit,
+            since=since,
+            until=until,
+            num_workers=args.workers,
+            show_progress=False,
+            enrichment_databases=[] if args.no_enrich else None,
+        )
     records = [normalise(p) for p in result.papers]
     emit(records)
     summarise(
@@ -412,6 +463,7 @@ def _cmd_search(args: argparse.Namespace) -> None:
         queried=dbs,
         failed=list(getattr(result, "failed_databases", None) or []),
         key_skipped=skipped_for_keys(args.databases),
+        degraded=watch.degraded,
         runtime=getattr(result, "runtime_seconds", None),
     )
 
@@ -443,18 +495,19 @@ def _cmd_snowball(args: argparse.Namespace) -> None:
     since, until = resolve_dates(args)
     engine = build_engine()
     seed = _seed_paper(engine, args.id)
-    result = engine.snowball(
-        seed,
-        max_depth=args.max_depth,
-        direction=args.direction,
-        max_papers_per_level=args.max_papers_per_level,
-        max_expansion_per_level=args.max_expansion_per_level,
-        databases=args.databases,
-        since=since,
-        until=until,
-        num_workers=args.workers,
-        show_progress=False,
-    )
+    with ConnectorWatch() as watch:
+        result = engine.snowball(
+            seed,
+            max_depth=args.max_depth,
+            direction=args.direction,
+            max_papers_per_level=args.max_papers_per_level,
+            max_expansion_per_level=args.max_expansion_per_level,
+            databases=args.databases,
+            since=since,
+            until=until,
+            num_workers=args.workers,
+            show_progress=False,
+        )
     papers = list(result.papers)
     if args.include_seed:
         papers.insert(0, result.seed_paper)
@@ -463,6 +516,7 @@ def _cmd_snowball(args: argparse.Namespace) -> None:
     summarise(
         f"snowball {args.direction} depth={args.max_depth} from {args.id}",
         records,
+        degraded=watch.degraded,
         extra=f"seed: {(seed.title or '')[:70]!r}",
     )
 
@@ -471,21 +525,23 @@ def _cmd_similar(args: argparse.Namespace) -> None:
     since, until = resolve_dates(args)
     engine = build_engine()
     seed = _seed_paper(engine, args.id)
-    result = engine.similar(
-        seed,
-        databases=args.databases,
-        max_papers_per_database=args.limit,
-        since=since,
-        until=until,
-        num_workers=args.workers,
-        show_progress=False,
-    )
+    with ConnectorWatch() as watch:
+        result = engine.similar(
+            seed,
+            databases=args.databases,
+            max_papers_per_database=args.limit,
+            since=since,
+            until=until,
+            num_workers=args.workers,
+            show_progress=False,
+        )
     records = [normalise(p) for p in result.papers]
     emit(records)
     summarise(
         f"similar to {args.id}",
         records,
         queried=args.databases or ["semantic_scholar", "pubmed"],
+        degraded=watch.degraded,
         extra=f"seed: {(seed.title or '')[:70]!r}",
     )
 
@@ -533,6 +589,55 @@ def _cmd_download(args: argparse.Namespace) -> None:
         file=sys.stderr,
     )
     print(str(target))
+
+
+def _cmd_doctor(args: argparse.Namespace) -> None:
+    """Probe every database with a trivial search and report what works.
+
+    Run this after adding or rotating API keys. A key can be present and still
+    rejected -- IEEE, for instance, issues a key immediately but leaves the
+    developer account inactive until it is approved, and the resulting 403
+    otherwise shows up as a silent zero-result search.
+    """
+    engine = build_engine()
+    width = max(len(db) for db in SEARCHABLE)
+    problems = 0
+
+    for db in SEARCHABLE:
+        label = f"{db:<{width}}"
+        env = KEY_ENV.get(db)
+        if env and not os.environ.get(env):
+            print(f"{label}  -- no key ({env} unset)")
+            continue
+        try:
+            with ConnectorWatch() as watch:
+                result = engine.search(
+                    args.query,
+                    databases=[db],
+                    max_papers_per_database=1,
+                    show_progress=False,
+                    enrichment_databases=[],
+                )
+        except Exception as e:  # noqa: BLE001 - doctor reports, never raises
+            problems += 1
+            print(f"{label}  FAILED  {type(e).__name__}: {str(e)[:120]}")
+            continue
+        n = len(result.papers)
+        if watch.degraded:
+            problems += 1
+            print(f"{label}  DEGRADED  {watch.degraded[0].split(': ', 1)[-1][:120]}")
+        elif db in getattr(result, "failed_databases", None) or []:
+            problems += 1
+            print(f"{label}  FAILED    connector error, re-run with more detail")
+        elif n:
+            print(f"{label}  ok        {n} paper(s)")
+        else:
+            print(f"{label}  no result for the probe query (may be fine)")
+
+    if not os.environ.get("FINDPAPERS_EMAIL"):
+        print("\nFINDPAPERS_EMAIL is unset: OpenAlex and CrossRef throttle harder"
+              " without a contact address.")
+    sys.exit(1 if problems else 0)
 
 
 def _cmd_to_bibtex(args: argparse.Namespace) -> None:
@@ -655,6 +760,15 @@ def build_parser() -> argparse.ArgumentParser:
     pd.add_argument("--out", default="lit_review/pdfs", help="Output directory.")
     pd.add_argument("--timeout", type=float, default=30.0)
     pd.set_defaults(func=_cmd_download)
+
+    pdoc = sub.add_parser(
+        "doctor",
+        help="Probe every database with a trivial search; report keys that fail.",
+    )
+    pdoc.add_argument(
+        "--query", default="[machine learning]", help="Probe query."
+    )
+    pdoc.set_defaults(func=_cmd_doctor)
 
     pb = sub.add_parser("to-bibtex", help="Convert JSON records to BibTeX entries.")
     pb.add_argument("--input", help="JSON file; default stdin.")

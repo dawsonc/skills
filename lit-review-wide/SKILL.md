@@ -45,7 +45,18 @@ bash ${CLAUDE_SKILL_DIR}/scripts/run.sh --check
 
 That prints the installed version, where it resolved from, and which API keys
 are present. If it exits non-zero the venv is missing: tell the user to run
-`bash ${CLAUDE_SKILL_DIR}/scripts/bootstrap.sh` once, and wait. Do not install
+`bash ${CLAUDE_SKILL_DIR}/scripts/bootstrap.sh` once, and wait.
+
+`--check` only reports which keys are *set*. To test whether they actually
+work, run the doctor — worth doing after the user adds or rotates a key, and
+whenever a database returns a suspicious zero:
+
+```bash
+bash ${CLAUDE_SKILL_DIR}/scripts/run.sh discover.py doctor
+```
+
+It probes each database with a one-paper search and reports `ok`, `DEGRADED`,
+`FAILED`, or no key, exiting non-zero if anything is wrong. Do not install
 it yourself mid-search, and never `pip install` from git at invocation time —
 the version in use is pinned to a single commit in `scripts/findpapers.pin`
 deliberately, so that what runs today is what was reviewed.
@@ -114,6 +125,11 @@ Each record carries `doi`, `arxiv_id`, `abstract`, `citation_count`,
 Read the script's docstring (`head -60 scripts/discover.py`) for the full
 schema.
 
+Coverage of the enrichment fields is uneven, and absent is not negative:
+`is_retracted: null` means nobody asserted either way, and `cited_by` is
+populated by `get` and `snowball` rather than by `search`. Expect abstracts on
+roughly two thirds of a mixed-database sweep.
+
 Records go to stdout; a run summary goes to stderr. Keep the two separate
 (`> out.json 2> summary.txt`, or let stderr through to your terminal) — the
 summary is how you learn which databases actually answered.
@@ -165,6 +181,21 @@ summary, so a keyless sweep still works — with thinner coverage and a hard
 OpenAlex ceiling. If `run.sh --check` reports missing keys and the review
 depends on IEEE/Elsevier/Clarivate-indexed venues, say so once and point the
 user at `~/.config/lit-review/findpapers.env`. Do not repeat it every run.
+
+### A present key can still be a dead key
+
+findpapers prefers partial results: a connector that hits a 403, an exhausted
+quota, or a rate limit logs a warning, returns what it has, and does **not**
+mark itself failed. A rejected API key therefore arrives as `0 papers`, which
+looks exactly like a database that has nothing on your topic.
+
+`discover.py` catches those warnings and prints them under `DEGRADED` in the
+run summary. **Never read a zero from a DEGRADED database as evidence about
+the literature.** Say so to the user, run `doctor` to confirm, and either fix
+the key or record the database as uncovered for that query. IEEE in
+particular issues a working-looking key immediately but leaves the developer
+account inactive until it approves it, and returns `403 Developer Inactive`
+until then.
 
 ## Workflow
 
@@ -308,7 +339,9 @@ saturation check has data.
 
 Log the databases as well as the counts, copied from the run summary. A sweep
 that quietly lost Scopus to an expired key looks exactly like a saturated
-field if all you recorded was "returned: 25, new: 3".
+field if all you recorded was "returned: 25, new: 3". Log any `DEGRADED` line
+verbatim — it is the record of which part of the literature this query did not
+actually cover.
 
 ### 8. Saturation check
 
